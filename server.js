@@ -6,15 +6,18 @@ const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
+
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use((req, res, next) => {
   res.setHeader('Connection', 'keep-alive');
   next();
 });
-app.use(cors({
-  origin: 'https://cloudvault17.netlify.app',
-  methods: ['GET', 'POST', 'DELETE'],
-  allowedHeaders: ['Content-Type']
-}));
+
 app.use(express.json());
 
 const s3 = new AWS.S3({
@@ -32,6 +35,15 @@ const supabase = createClient(
 
 const upload = multer({ storage: multer.memoryStorage() });
 
+// Generate pre-signed URL for a file
+function getSignedUrl(key) {
+  return s3.getSignedUrl('getObject', {
+    Bucket: process.env.B2_BUCKET,
+    Key: key,
+    Expires: 60 * 60 * 24 // 24 hours
+  });
+}
+
 app.post('/upload', upload.single('file'), async (req, res) => {
   try {
     const file = req.file;
@@ -44,7 +56,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
       ContentType: file.mimetype
     }).promise();
 
-    const publicUrl = `${process.env.CDN_URL}/${key}`;
+    const publicUrl = getSignedUrl(key);
     const shareCode = uuidv4().slice(0, 8);
 
     const category = file.mimetype.startsWith('video') ? 'video' :
@@ -69,22 +81,51 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 });
 
 app.get('/files', async (req, res) => {
-  const { data, error } = await supabase.from('files').select('*').order('created_at', { ascending: false });
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+  try {
+    const { data, error } = await supabase
+      .from('files')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    // Generate fresh signed URLs for all files
+    const filesWithUrls = data.map(f => ({
+      ...f,
+      public_url: getSignedUrl(f.r2_key)
+    }));
+
+    res.json(filesWithUrls);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.delete('/files/:id', async (req, res) => {
-  const { data: file } = await supabase.from('files').select('r2_key').eq('id', req.params.id).single();
-  if (file) {
-    await s3.deleteObject({ Bucket: process.env.B2_BUCKET, Key: file.r2_key }).promise();
-    await supabase.from('files').delete().eq('id', req.params.id);
+  try {
+    const { data: file } = await supabase
+      .from('files')
+      .select('r2_key')
+      .eq('id', req.params.id)
+      .single();
+
+    if (file) {
+      await s3.deleteObject({
+        Bucket: process.env.B2_BUCKET,
+        Key: file.r2_key
+      }).promise();
+      await supabase.from('files').delete().eq('id', req.params.id);
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-  res.json({ success: true });
 });
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-const server = app.listen(process.env.PORT || 3000, () => console.log('CloudVault server running'));
+const server = app.listen(process.env.PORT || 3000, () => 
+  console.log('CloudVault server running')
+);
 server.timeout = 120000;
 server.keepAliveTimeout = 120000;
