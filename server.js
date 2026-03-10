@@ -35,19 +35,12 @@ const supabase = createClient(
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Generate pre-signed URL routed through Cloudflare for free unlimited bandwidth
 function getSignedUrl(key) {
   return s3.getSignedUrl('getObject', {
     Bucket: process.env.B2_BUCKET,
     Key: key,
-    Expires: 60 * 60 * 24
+    Expires: 60 * 60 * 24 // 24 hours
   });
-}
-  // Swap Backblaze domain with Cloudflare Worker domain
-  return url.replace(
-    `s3.us-east-005.backblazeb2.com/${process.env.B2_BUCKET}`,
-    process.env.CDN_URL.replace('https://', '')
-  );
 }
 
 app.post('/upload', upload.single('file'), async (req, res) => {
@@ -62,7 +55,6 @@ app.post('/upload', upload.single('file'), async (req, res) => {
       ContentType: file.mimetype
     }).promise();
 
-    const publicUrl = getSignedUrl(key);
     const shareCode = uuidv4().slice(0, 8);
 
     const category = file.mimetype.startsWith('video') ? 'video' :
@@ -75,12 +67,12 @@ app.post('/upload', upload.single('file'), async (req, res) => {
       type: file.mimetype,
       category,
       r2_key: key,
-      public_url: publicUrl,
+      public_url: getSignedUrl(key),
       share_code: shareCode
     }]).select().single();
 
     if (error) throw error;
-    res.json({ success: true, file: data });
+    res.json({ success: true, file: { ...data, public_url: getSignedUrl(key) } });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -95,7 +87,6 @@ app.get('/files', async (req, res) => {
 
     if (error) throw error;
 
-    // Generate fresh signed URLs routed through Cloudflare
     const filesWithUrls = data.map(f => ({
       ...f,
       public_url: getSignedUrl(f.r2_key)
