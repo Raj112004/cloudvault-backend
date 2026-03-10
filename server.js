@@ -35,13 +35,18 @@ const supabase = createClient(
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Generate pre-signed URL for a file
+// Generate pre-signed URL routed through Cloudflare for free unlimited bandwidth
 function getSignedUrl(key) {
-  return s3.getSignedUrl('getObject', {
+  const url = s3.getSignedUrl('getObject', {
     Bucket: process.env.B2_BUCKET,
     Key: key,
     Expires: 60 * 60 * 24 // 24 hours
   });
+  // Swap Backblaze domain with Cloudflare Worker domain
+  return url.replace(
+    `s3.us-east-005.backblazeb2.com/${process.env.B2_BUCKET}`,
+    process.env.CDN_URL.replace('https://', '')
+  );
 }
 
 app.post('/upload', upload.single('file'), async (req, res) => {
@@ -89,7 +94,7 @@ app.get('/files', async (req, res) => {
 
     if (error) throw error;
 
-    // Generate fresh signed URLs for all files
+    // Generate fresh signed URLs routed through Cloudflare
     const filesWithUrls = data.map(f => ({
       ...f,
       public_url: getSignedUrl(f.r2_key)
@@ -124,7 +129,7 @@ app.delete('/files/:id', async (req, res) => {
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-const server = app.listen(process.env.PORT || 3000, () => 
+const server = app.listen(process.env.PORT || 3000, () =>
   console.log('CloudVault server running')
 );
 server.timeout = 120000;
