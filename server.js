@@ -6,6 +6,10 @@ const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
+app.use((req, res, next) => {
+  res.setHeader('Connection', 'keep-alive');
+  next();
+});
 app.use(cors({
   origin: 'https://cloudvault17.netlify.app',
   methods: ['GET', 'POST', 'DELETE'],
