@@ -37,11 +37,12 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 // Generate pre-signed URL routed through Cloudflare for free unlimited bandwidth
 function getSignedUrl(key) {
-  const url = s3.getSignedUrl('getObject', {
+  return s3.getSignedUrl('getObject', {
     Bucket: process.env.B2_BUCKET,
     Key: key,
-    Expires: 60 * 60 * 24 // 24 hours
+    Expires: 60 * 60 * 24
   });
+}
   // Swap Backblaze domain with Cloudflare Worker domain
   return url.replace(
     `s3.us-east-005.backblazeb2.com/${process.env.B2_BUCKET}`,
