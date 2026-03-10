@@ -85,4 +85,6 @@ app.delete('/files/:id', async (req, res) => {
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-app.listen(3000, () => console.log('CloudVault server running on port 3000'));
+const server = app.listen(process.env.PORT || 3000, () => console.log('CloudVault server running'));
+server.timeout = 120000;
+server.keepAliveTimeout = 120000;
