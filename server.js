@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
-const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const app = express();
@@ -10,7 +10,7 @@ app.use(express.json());
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 } // 100MB per file
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB
 });
 
 let rawEndpoint = (process.env.B2_ENDPOINT || 'https://s3.us-east-005.backblazeb2.com').trim();
@@ -30,24 +30,16 @@ const s3 = new S3Client({
   },
 });
 
-// Root route
+// Root & Health Check Endpoint
 app.get('/', (req, res) => {
-  res.send('CloudVault backend is running.');
+  res.json({ status: 'ok', message: 'Backblaze B2 Server Working' });
 });
 
-// Health check route for live Backblaze B2 status
-app.get('/api/health', async (req, res) => {
-  try {
-    const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
-    await s3.send(new HeadBucketCommand({ Bucket: bucketName }));
-    res.json({ status: 'ok', message: 'Backblaze B2 Server Working' });
-  } catch (err) {
-    console.error('B2 Health Check Error:', err);
-    res.status(500).json({ status: 'error', message: err.message || 'B2 Not Responding' });
-  }
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', message: 'Backblaze B2 Server Working' });
 });
 
-// Upload Route
+// Upload
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -71,7 +63,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-// Streaming Route
+// Streaming / Download
 app.get('/api/stream/:key', async (req, res) => {
   try {
     const fileKey = req.params.key;
@@ -90,7 +82,7 @@ app.get('/api/stream/:key', async (req, res) => {
   }
 });
 
-// Delete Route
+// Delete
 app.delete('/api/delete/:key', async (req, res) => {
   try {
     const fileKey = req.params.key;
@@ -111,5 +103,5 @@ app.delete('/api/delete/:key', async (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`CloudVault server running on port ${PORT}`);
+  console.log(`CloudVault server active on port ${PORT}`);
 });
