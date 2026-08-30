@@ -2,10 +2,9 @@ const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const app = express();
-app.use(cors());
+app.use(cors({ origin: '*' }));
 app.use(express.json());
 
 const upload = multer({
@@ -30,16 +29,11 @@ const s3 = new S3Client({
   },
 });
 
-// Root & Health Check Endpoint
 app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'Backblaze B2 Server Working' });
 });
 
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', message: 'Backblaze B2 Server Working' });
-});
-
-// Upload
+// Upload route
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -63,7 +57,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-// Streaming / Download
+// Direct Pipe Streaming Route with Full CORS & Range Support
 app.get('/api/stream/:key', async (req, res) => {
   try {
     const fileKey = req.params.key;
@@ -72,17 +66,35 @@ app.get('/api/stream/:key', async (req, res) => {
     const command = new GetObjectCommand({
       Bucket: bucketName,
       Key: fileKey,
+      Range: req.headers.range,
     });
 
-    const signedUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
-    res.redirect(signedUrl);
+    const data = await s3.send(command);
+
+    res.set({
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+      'Access-Control-Allow-Headers': 'Range, Origin, Content-Type, Accept',
+      'Content-Type': data.ContentType || 'application/octet-stream',
+      'Accept-Ranges': 'bytes',
+    });
+
+    if (data.ContentLength) {
+      res.set('Content-Length', data.ContentLength);
+    }
+    if (data.ContentRange) {
+      res.status(206);
+      res.set('Content-Range', data.ContentRange);
+    }
+
+    data.Body.pipe(res);
   } catch (err) {
     console.error('Streaming error:', err);
     res.status(500).send('Streaming error');
   }
 });
 
-// Delete
+// Delete route
 app.delete('/api/delete/:key', async (req, res) => {
   try {
     const fileKey = req.params.key;
