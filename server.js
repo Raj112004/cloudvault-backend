@@ -1,16 +1,16 @@
 const express = require('express');
 const cors = require('cors');
-const { S3Client, PutObjectCommand, PutBucketCorsCommand } = require('@aws-sdk/client-s3');
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const multer = require('multer');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 
 const app = express();
-
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['*']
-}));
+app.use(cors());
 app.use(express.json());
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB limit
+});
 
 let rawEndpoint = (process.env.B2_ENDPOINT || 'https://s3.us-east-005.backblazeb2.com').trim();
 if (!rawEndpoint.startsWith('http://') && !rawEndpoint.startsWith('https://')) {
@@ -23,71 +23,43 @@ const extractedRegion = regionMatch ? regionMatch[1] : 'us-east-005';
 const s3 = new S3Client({
   endpoint: rawEndpoint,
   region: extractedRegion,
-  forcePathStyle: true,
   credentials: {
     accessKeyId: (process.env.B2_KEY_ID || '').trim(),
     secretAccessKey: (process.env.B2_APP_KEY || '').trim(),
   },
 });
 
-// Auto-configure S3 CORS on Backblaze B2 bucket
-async function configureBucketCors() {
-  const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
-  if (!bucketName) return;
-
-  try {
-    const corsParams = {
-      Bucket: bucketName,
-      CORSConfiguration: {
-        CORSRules: [
-          {
-            AllowedHeaders: ['*'],
-            AllowedMethods: ['GET', 'PUT', 'POST', 'HEAD', 'DELETE'],
-            AllowedOrigins: ['*'],
-            ExposeHeaders: ['ETag'],
-            MaxAgeSeconds: 3600,
-          },
-        ],
-      },
-    };
-    await s3.send(new PutBucketCorsCommand(corsParams));
-    console.log('✅ Backblaze S3 CORS policy successfully applied!');
-  } catch (err) {
-    console.warn('⚠️ Could not apply S3 CORS automatically:', err.message);
-  }
-}
-configureBucketCors();
-
 app.get('/', (req, res) => {
-  res.send('CloudVault backend is running.');
+  res.send('CloudVault backend running.');
 });
 
-// Presigned Upload Route
-app.post('/api/upload-url', async (req, res) => {
+// Direct proxy upload - Completely bypasses B2 browser CORS issues!
+app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
-    const { filename } = req.body;
-    if (!filename) {
-      return res.status(400).json({ error: 'Filename is required' });
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
-    const cleanName = filename.replace(/\s+/g, '_');
+    const cleanName = req.file.originalname.replace(/\s+/g, '_');
     const fileKey = `${Date.now()}-${cleanName}`;
+    const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
 
     const command = new PutObjectCommand({
       Bucket: bucketName,
       Key: fileKey,
+      Body: req.file.buffer,
+      ContentType: req.file.mimetype || 'application/octet-stream',
     });
 
-    const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 900 });
-    res.json({ uploadUrl, fileKey });
+    await s3.send(command);
+    res.json({ success: true, fileKey, name: req.file.originalname, size: req.file.size });
   } catch (error) {
-    console.error('Error generating upload URL:', error);
-    res.status(500).json({ error: error.message || 'Failed to generate upload URL' });
+    console.error('B2 Server Upload Error:', error);
+    res.status(500).json({ error: error.message || 'Upload failed' });
   }
 });
 
-// Stream Route
+// Stream / Download Route
 app.get('/api/stream/:key', (req, res) => {
   const fileKey = req.params.key;
   if (process.env.CDN_URL) {
