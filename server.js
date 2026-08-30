@@ -1,7 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const app = express();
 app.use(cors());
@@ -9,7 +10,7 @@ app.use(express.json());
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 } // 100MB limit
+  limits: { fileSize: 100 * 1024 * 1024 }
 });
 
 let rawEndpoint = (process.env.B2_ENDPOINT || 'https://s3.us-east-005.backblazeb2.com').trim();
@@ -33,7 +34,7 @@ app.get('/', (req, res) => {
   res.send('CloudVault backend running.');
 });
 
-// Direct proxy upload - Completely bypasses B2 browser CORS issues!
+// Upload route
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
@@ -54,21 +55,29 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     await s3.send(command);
     res.json({ success: true, fileKey, name: req.file.originalname, size: req.file.size });
   } catch (error) {
-    console.error('B2 Server Upload Error:', error);
+    console.error('B2 Upload Error:', error);
     res.status(500).json({ error: error.message || 'Upload failed' });
   }
 });
 
-// Stream / Download Route
-app.get('/api/stream/:key', (req, res) => {
-  const fileKey = req.params.key;
-  if (process.env.CDN_URL) {
-    const cdnBase = process.env.CDN_URL.replace(/\/+$/, '');
-    return res.redirect(`${cdnBase}/${fileKey}`);
+// Secure signed stream / download route for private B2 buckets
+app.get('/api/stream/:key', async (req, res) => {
+  try {
+    const fileKey = req.params.key;
+    const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
+
+    const command = new GetObjectCommand({
+      Bucket: bucketName,
+      Key: fileKey,
+    });
+
+    // Generate a temporary 1-hour signed URL
+    const signedUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
+    res.redirect(signedUrl);
+  } catch (err) {
+    console.error('Streaming error:', err);
+    res.status(500).send('Streaming error');
   }
-  const endpoint = rawEndpoint.replace(/\/+$/, '');
-  const bucket = (process.env.B2_BUCKET_NAME || '').trim();
-  res.redirect(`${endpoint}/${bucket}/${fileKey}`);
 });
 
 const PORT = process.env.PORT || 10000;
