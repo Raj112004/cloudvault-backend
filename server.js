@@ -1,16 +1,15 @@
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
-const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
 
 const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// Support up to 2 GB single file uploads
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 2048 * 1024 * 1024 }
+  limits: { fileSize: 2048 * 1024 * 1024 } // 2 GB
 });
 
 let rawEndpoint = (process.env.B2_ENDPOINT || 'https://s3.us-east-005.backblazeb2.com').trim();
@@ -30,11 +29,24 @@ const s3 = new S3Client({
   },
 });
 
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', message: 'Backblaze B2 Server Working' });
+// REAL BACKBLAZE B2 HEALTH CHECK HANDSHAKE
+app.get('/api/health', async (req, res) => {
+  try {
+    const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
+    // Sends an actual auth handshake to Backblaze S3 API
+    await s3.send(new HeadBucketCommand({ Bucket: bucketName }));
+    res.json({ status: 'ok', message: 'Backblaze B2 Server Working' });
+  } catch (err) {
+    console.error('B2 Live Handshake Error:', err);
+    res.status(500).json({ status: 'error', message: err.message || 'Backblaze B2 Auth / Bucket Unreachable' });
+  }
 });
 
-// Primary Upload Route
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', message: 'CloudVault Backend is running' });
+});
+
+// Upload route
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
@@ -58,7 +70,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-// Byte-Range Media Streaming & Download
+// Stream route with range support
 app.get('/api/stream/:key', async (req, res) => {
   try {
     const fileKey = req.params.key;
@@ -80,9 +92,7 @@ app.get('/api/stream/:key', async (req, res) => {
       'Accept-Ranges': 'bytes',
     });
 
-    if (data.ContentLength) {
-      res.set('Content-Length', data.ContentLength);
-    }
+    if (data.ContentLength) res.set('Content-Length', data.ContentLength);
     if (data.ContentRange) {
       res.status(206);
       res.set('Content-Range', data.ContentRange);
@@ -91,11 +101,11 @@ app.get('/api/stream/:key', async (req, res) => {
     data.Body.pipe(res);
   } catch (err) {
     console.error('Streaming error:', err);
-    res.status(500).send('Streaming error');
+    if (!res.headersSent) res.status(500).send('Streaming error');
   }
 });
 
-// Delete Route
+// Delete route
 app.delete('/api/delete/:key', async (req, res) => {
   try {
     const fileKey = req.params.key;
