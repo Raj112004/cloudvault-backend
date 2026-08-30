@@ -1,10 +1,17 @@
 const express = require('express');
 const cors = require('cors');
-const { S3Client, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
-const { Upload } = require('@aws-sdk/lib-storage');
+const multer = require('multer');
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 
 const app = express();
 app.use(cors({ origin: '*' }));
+app.use(express.json());
+
+// Support up to 2 GB single file uploads
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2048 * 1024 * 1024 }
+});
 
 let rawEndpoint = (process.env.B2_ENDPOINT || 'https://s3.us-east-005.backblazeb2.com').trim();
 if (!rawEndpoint.startsWith('http://') && !rawEndpoint.startsWith('https://')) {
@@ -27,42 +34,31 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'Backblaze B2 Server Working' });
 });
 
-// Direct Pipe Streaming Upload (Streams request body directly into B2 with minimal RAM usage)
-app.post('/api/upload', async (req, res) => {
+// Primary Upload Route
+app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
-    const rawFilename = req.headers['x-filename'] || `file-${Date.now()}`;
-    const cleanName = decodeURIComponent(rawFilename).replace(/\s+/g, '_');
+    if (!req.file) return res.status(400).json({ error: 'No file provided' });
+
+    const cleanName = req.file.originalname.replace(/\s+/g, '_');
     const fileKey = `${Date.now()}-${cleanName}`;
-    const contentType = req.headers['content-type'] || 'application/octet-stream';
     const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
 
-    const parallelUpload = new Upload({
-      client: s3,
-      params: {
-        Bucket: bucketName,
-        Key: fileKey,
-        Body: req,
-        ContentType: contentType,
-      },
-      queueSize: 4,
-      partSize: 5 * 1024 * 1024, // 5MB rolling chunks
-      leavePartsOnError: false,
+    const command = new PutObjectCommand({
+      Bucket: bucketName,
+      Key: fileKey,
+      Body: req.file.buffer,
+      ContentType: req.file.mimetype || 'application/octet-stream',
     });
 
-    await parallelUpload.done();
-
-    res.json({
-      success: true,
-      fileKey,
-      name: decodeURIComponent(rawFilename)
-    });
-  } catch (err) {
-    console.error('Streaming Upload Error:', err);
-    res.status(500).json({ error: err.message || 'Stream upload failed' });
+    await s3.send(command);
+    res.json({ success: true, fileKey, name: req.file.originalname, size: req.file.size });
+  } catch (error) {
+    console.error('B2 Upload Error:', error);
+    res.status(500).json({ error: error.message || 'Upload to Backblaze failed' });
   }
 });
 
-// Byte-Range Streaming Route with CORS support
+// Byte-Range Media Streaming & Download
 app.get('/api/stream/:key', async (req, res) => {
   try {
     const fileKey = req.params.key;
@@ -120,5 +116,5 @@ app.delete('/api/delete/:key', async (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`CloudVault server active on port ${PORT}`);
+  console.log(`CloudVault backend running on port ${PORT}`);
 });
