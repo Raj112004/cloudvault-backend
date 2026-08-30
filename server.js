@@ -1,11 +1,10 @@
 const express = require('express');
 const cors = require('cors');
-const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { S3Client, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { Upload } = require('@aws-sdk/lib-storage');
 
 const app = express();
 app.use(cors({ origin: '*' }));
-app.use(express.json());
 
 let rawEndpoint = (process.env.B2_ENDPOINT || 'https://s3.us-east-005.backblazeb2.com').trim();
 if (!rawEndpoint.startsWith('http://') && !rawEndpoint.startsWith('https://')) {
@@ -28,33 +27,42 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'Backblaze B2 Server Working' });
 });
 
-// 1. Generate Presigned URL for Direct Browser-to-B2 Upload
-app.post('/api/get-upload-url', async (req, res) => {
+// Direct Pipe Streaming Upload (Streams request body directly into B2 with minimal RAM usage)
+app.post('/api/upload', async (req, res) => {
   try {
-    const { filename, contentType } = req.body;
-    if (!filename) return res.status(400).json({ error: 'Filename is required' });
-
-    const cleanName = filename.replace(/\s+/g, '_');
+    const rawFilename = req.headers['x-filename'] || `file-${Date.now()}`;
+    const cleanName = decodeURIComponent(rawFilename).replace(/\s+/g, '_');
     const fileKey = `${Date.now()}-${cleanName}`;
+    const contentType = req.headers['content-type'] || 'application/octet-stream';
     const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
 
-    const command = new PutObjectCommand({
-      Bucket: bucketName,
-      Key: fileKey,
-      ContentType: contentType || 'application/octet-stream',
+    const parallelUpload = new Upload({
+      client: s3,
+      params: {
+        Bucket: bucketName,
+        Key: fileKey,
+        Body: req,
+        ContentType: contentType,
+      },
+      queueSize: 4,
+      partSize: 5 * 1024 * 1024, // 5MB rolling chunks
+      leavePartsOnError: false,
     });
 
-    // Generate a secure upload URL valid for 1 hour
-    const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
+    await parallelUpload.done();
 
-    res.json({ success: true, uploadUrl, fileKey });
+    res.json({
+      success: true,
+      fileKey,
+      name: decodeURIComponent(rawFilename)
+    });
   } catch (err) {
-    console.error('Error generating upload URL:', err);
-    res.status(500).json({ error: err.message || 'Failed to generate upload URL' });
+    console.error('Streaming Upload Error:', err);
+    res.status(500).json({ error: err.message || 'Stream upload failed' });
   }
 });
 
-// 2. Direct Streaming / Download Route
+// Byte-Range Streaming Route with CORS support
 app.get('/api/stream/:key', async (req, res) => {
   try {
     const fileKey = req.params.key;
@@ -91,7 +99,7 @@ app.get('/api/stream/:key', async (req, res) => {
   }
 });
 
-// 3. Delete Route
+// Delete Route
 app.delete('/api/delete/:key', async (req, res) => {
   try {
     const fileKey = req.params.key;
@@ -112,5 +120,5 @@ app.delete('/api/delete/:key', async (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`CloudVault direct stream server active on port ${PORT}`);
+  console.log(`CloudVault server active on port ${PORT}`);
 });
