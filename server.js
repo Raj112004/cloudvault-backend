@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
-const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const app = express();
@@ -10,7 +10,7 @@ app.use(express.json());
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 }
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB per file
 });
 
 let rawEndpoint = (process.env.B2_ENDPOINT || 'https://s3.us-east-005.backblazeb2.com').trim();
@@ -31,15 +31,13 @@ const s3 = new S3Client({
 });
 
 app.get('/', (req, res) => {
-  res.send('CloudVault backend running.');
+  res.send('CloudVault backend is running.');
 });
 
-// Upload route
+// 1. Upload Route
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
     const cleanName = req.file.originalname.replace(/\s+/g, '_');
     const fileKey = `${Date.now()}-${cleanName}`;
@@ -60,7 +58,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-// Signed stream route
+// 2. Signed Stream / Download Route
 app.get('/api/stream/:key', async (req, res) => {
   try {
     const fileKey = req.params.key;
@@ -76,6 +74,25 @@ app.get('/api/stream/:key', async (req, res) => {
   } catch (err) {
     console.error('Streaming error:', err);
     res.status(500).send('Streaming error');
+  }
+});
+
+// 3. Delete File Route (Removes object from Backblaze B2)
+app.delete('/api/delete/:key', async (req, res) => {
+  try {
+    const fileKey = req.params.key;
+    const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
+
+    const command = new DeleteObjectCommand({
+      Bucket: bucketName,
+      Key: fileKey,
+    });
+
+    await s3.send(command);
+    res.json({ success: true, message: 'Deleted from B2' });
+  } catch (err) {
+    console.error('Delete error:', err);
+    res.status(500).json({ error: err.message || 'Delete failed' });
   }
 });
 
