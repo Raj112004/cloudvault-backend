@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, PutBucketCorsCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const app = express();
@@ -20,7 +20,6 @@ if (!rawEndpoint.startsWith('http://') && !rawEndpoint.startsWith('https://')) {
 const regionMatch = rawEndpoint.match(/s3\.([a-z0-9-]+)\.backblazeb2\.com/i);
 const extractedRegion = regionMatch ? regionMatch[1] : 'us-east-005';
 
-// forcePathStyle: true ensures Backblaze receives path-style requests
 const s3 = new S3Client({
   endpoint: rawEndpoint,
   region: extractedRegion,
@@ -30,6 +29,34 @@ const s3 = new S3Client({
     secretAccessKey: (process.env.B2_APP_KEY || '').trim(),
   },
 });
+
+// Auto-configure S3 CORS on Backblaze B2 bucket
+async function configureBucketCors() {
+  const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
+  if (!bucketName) return;
+
+  try {
+    const corsParams = {
+      Bucket: bucketName,
+      CORSConfiguration: {
+        CORSRules: [
+          {
+            AllowedHeaders: ['*'],
+            AllowedMethods: ['GET', 'PUT', 'POST', 'HEAD', 'DELETE'],
+            AllowedOrigins: ['*'],
+            ExposeHeaders: ['ETag'],
+            MaxAgeSeconds: 3600,
+          },
+        ],
+      },
+    };
+    await s3.send(new PutBucketCorsCommand(corsParams));
+    console.log('✅ Backblaze S3 CORS policy successfully applied!');
+  } catch (err) {
+    console.warn('⚠️ Could not apply S3 CORS automatically:', err.message);
+  }
+}
+configureBucketCors();
 
 app.get('/', (req, res) => {
   res.send('CloudVault backend is running.');
@@ -44,23 +71,18 @@ app.post('/api/upload-url', async (req, res) => {
     }
 
     const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
-    if (!bucketName) {
-      throw new Error('B2_BUCKET_NAME is missing in environment variables');
-    }
-
     const cleanName = filename.replace(/\s+/g, '_');
     const fileKey = `${Date.now()}-${cleanName}`;
 
-    // Do NOT lock ContentType in the command signature to avoid B2 CORS preflight header mismatches
     const command = new PutObjectCommand({
       Bucket: bucketName,
-      Key: fileKey
+      Key: fileKey,
     });
 
     const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 900 });
     res.json({ uploadUrl, fileKey });
   } catch (error) {
-    console.error('Error generating presigned URL:', error.message || error);
+    console.error('Error generating upload URL:', error);
     res.status(500).json({ error: error.message || 'Failed to generate upload URL' });
   }
 });
