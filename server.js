@@ -5,22 +5,26 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const app = express();
 
-app.use(cors());
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['*']
+}));
 app.use(express.json());
 
-// Ensure endpoint always has https://
 let rawEndpoint = (process.env.B2_ENDPOINT || 'https://s3.us-east-005.backblazeb2.com').trim();
 if (!rawEndpoint.startsWith('http://') && !rawEndpoint.startsWith('https://')) {
   rawEndpoint = `https://${rawEndpoint}`;
 }
 
-// Extract region automatically (e.g. us-east-005)
 const regionMatch = rawEndpoint.match(/s3\.([a-z0-9-]+)\.backblazeb2\.com/i);
 const extractedRegion = regionMatch ? regionMatch[1] : 'us-east-005';
 
+// forcePathStyle: true ensures Backblaze receives path-style requests
 const s3 = new S3Client({
   endpoint: rawEndpoint,
   region: extractedRegion,
+  forcePathStyle: true,
   credentials: {
     accessKeyId: (process.env.B2_KEY_ID || '').trim(),
     secretAccessKey: (process.env.B2_APP_KEY || '').trim(),
@@ -34,7 +38,7 @@ app.get('/', (req, res) => {
 // Presigned Upload Route
 app.post('/api/upload-url', async (req, res) => {
   try {
-    const { filename, contentType } = req.body;
+    const { filename } = req.body;
     if (!filename) {
       return res.status(400).json({ error: 'Filename is required' });
     }
@@ -47,10 +51,10 @@ app.post('/api/upload-url', async (req, res) => {
     const cleanName = filename.replace(/\s+/g, '_');
     const fileKey = `${Date.now()}-${cleanName}`;
 
+    // Do NOT lock ContentType in the command signature to avoid B2 CORS preflight header mismatches
     const command = new PutObjectCommand({
       Bucket: bucketName,
-      Key: fileKey,
-      ContentType: contentType || 'application/octet-stream',
+      Key: fileKey
     });
 
     const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 900 });
