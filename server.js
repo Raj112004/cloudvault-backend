@@ -1,16 +1,15 @@
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
-const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadBucketCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 
 const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// Buffer limit up to 1 GB
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 1024 * 1024 * 1024 }
+  limits: { fileSize: 1024 * 1024 * 1024 } // 1 GB limit
 });
 
 let rawEndpoint = (process.env.B2_ENDPOINT || 'https://s3.us-east-005.backblazeb2.com').trim();
@@ -30,7 +29,7 @@ const s3 = new S3Client({
   },
 });
 
-// Real Authenticated B2 Bucket Health Check
+// Authenticated Live Health Check
 app.get('/api/health', async (req, res) => {
   try {
     const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
@@ -38,7 +37,7 @@ app.get('/api/health', async (req, res) => {
     res.json({ status: 'ok', message: 'Backblaze B2 Server Working' });
   } catch (err) {
     console.error('B2 Handshake Error:', err.message);
-    res.status(500).json({ status: 'error', message: err.message || 'Backblaze B2 Unreachable' });
+    res.status(500).json({ status: 'error', message: err.message });
   }
 });
 
@@ -46,7 +45,7 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'CloudVault Backend is online' });
 });
 
-// Upload Route
+// Upload Route (Uploads directly to Private Bucket)
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
@@ -70,11 +69,11 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-// Universal Stream & Download Handler
-async function streamHandler(req, res) {
+// Authenticated Private Stream Proxy with Fallback Matcher
+app.get('/api/stream', async (req, res) => {
   try {
-    const rawKey = req.query.key || req.params.key || req.params[0];
-    if (!rawKey) return res.status(400).send('Missing file key');
+    const rawKey = req.query.key || req.query.file;
+    if (!rawKey) return res.status(400).send('Missing file key parameter');
 
     const fileKey = decodeURIComponent(rawKey);
     const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
@@ -92,9 +91,21 @@ async function streamHandler(req, res) {
     try {
       data = await s3.send(new GetObjectCommand(s3Params));
     } catch (primaryErr) {
-      // Fallback: try key with underscores if raw key has spaces
-      s3Params.Key = fileKey.replace(/\s+/g, '_');
-      data = await s3.send(new GetObjectCommand(s3Params));
+      // If exact key is not found, attempt fuzzy match against existing bucket keys
+      const listResp = await s3.send(new ListObjectsV2Command({ Bucket: bucketName, MaxKeys: 50 }));
+      const foundItem = (listResp.Contents || []).find(item => 
+        item.Key === fileKey || 
+        item.Key === fileKey.replace(/\s+/g, '_') ||
+        fileKey.includes(item.Key) ||
+        item.Key.includes(fileKey)
+      );
+
+      if (foundItem) {
+        s3Params.Key = foundItem.Key;
+        data = await s3.send(new GetObjectCommand(s3Params));
+      } else {
+        throw new Error('Key not found in Backblaze bucket');
+      }
     }
 
     res.set({
@@ -114,21 +125,17 @@ async function streamHandler(req, res) {
 
     data.Body.pipe(res);
   } catch (err) {
-    console.error('Stream Fetch Error:', err.message);
+    console.error('Private Stream Error:', err.message);
     if (!res.headersSent) {
       res.status(404).send('File not found in Backblaze bucket');
     }
   }
-}
-
-app.get('/api/stream', streamHandler);
-app.get('/api/stream/:key', streamHandler);
-app.get('/api/stream/*', streamHandler);
+});
 
 // Delete Route
 app.delete('/api/delete', async (req, res) => {
   try {
-    const rawKey = req.query.key || req.params.key || req.params[0];
+    const rawKey = req.query.key;
     if (!rawKey) return res.status(400).json({ error: 'Missing key' });
 
     const fileKey = decodeURIComponent(rawKey);
