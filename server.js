@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
-const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const app = express();
@@ -30,11 +30,24 @@ const s3 = new S3Client({
   },
 });
 
+// Root route
 app.get('/', (req, res) => {
   res.send('CloudVault backend is running.');
 });
 
-// 1. Upload Route
+// Health check route for live Backblaze B2 status
+app.get('/api/health', async (req, res) => {
+  try {
+    const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
+    await s3.send(new HeadBucketCommand({ Bucket: bucketName }));
+    res.json({ status: 'ok', message: 'Backblaze B2 Server Working' });
+  } catch (err) {
+    console.error('B2 Health Check Error:', err);
+    res.status(500).json({ status: 'error', message: err.message || 'B2 Not Responding' });
+  }
+});
+
+// Upload Route
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -58,7 +71,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-// 2. Signed Stream / Download Route
+// Streaming Route
 app.get('/api/stream/:key', async (req, res) => {
   try {
     const fileKey = req.params.key;
@@ -77,7 +90,7 @@ app.get('/api/stream/:key', async (req, res) => {
   }
 });
 
-// 3. Delete File Route (Removes object from Backblaze B2)
+// Delete Route
 app.delete('/api/delete/:key', async (req, res) => {
   try {
     const fileKey = req.params.key;
