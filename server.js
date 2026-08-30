@@ -7,9 +7,10 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
+// Buffer limit up to 1 GB
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 2048 * 1024 * 1024 } // 2 GB
+  limits: { fileSize: 1024 * 1024 * 1024 }
 });
 
 let rawEndpoint = (process.env.B2_ENDPOINT || 'https://s3.us-east-005.backblazeb2.com').trim();
@@ -29,20 +30,20 @@ const s3 = new S3Client({
   },
 });
 
-// Live Health Check
+// Real Authenticated B2 Bucket Health Check
 app.get('/api/health', async (req, res) => {
   try {
     const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
     await s3.send(new HeadBucketCommand({ Bucket: bucketName }));
     res.json({ status: 'ok', message: 'Backblaze B2 Server Working' });
   } catch (err) {
-    console.error('B2 Handshake Error:', err);
+    console.error('B2 Handshake Error:', err.message);
     res.status(500).json({ status: 'error', message: err.message || 'Backblaze B2 Unreachable' });
   }
 });
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', message: 'CloudVault Backend is running' });
+  res.json({ status: 'ok', message: 'CloudVault Backend is online' });
 });
 
 // Upload Route
@@ -50,7 +51,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
 
-    const cleanName = req.file.originalname.replace(/\s+/g, '_');
+    const cleanName = req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
     const fileKey = `${Date.now()}-${cleanName}`;
     const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
 
@@ -65,12 +66,12 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     res.json({ success: true, fileKey, name: req.file.originalname, size: req.file.size });
   } catch (error) {
     console.error('B2 Upload Error:', error);
-    res.status(500).json({ error: error.message || 'Upload to Backblaze failed' });
+    res.status(500).json({ error: error.message || 'Upload failed' });
   }
 });
 
-// Stream Handler Supporting Both Path & Query Params
-async function handleStream(req, res) {
+// Universal Stream & Download Handler
+async function streamHandler(req, res) {
   try {
     const rawKey = req.query.key || req.params.key || req.params[0];
     if (!rawKey) return res.status(400).send('Missing file key');
@@ -91,7 +92,7 @@ async function handleStream(req, res) {
     try {
       data = await s3.send(new GetObjectCommand(s3Params));
     } catch (primaryErr) {
-      // Fallback matching: check with underscores
+      // Fallback: try key with underscores if raw key has spaces
       s3Params.Key = fileKey.replace(/\s+/g, '_');
       data = await s3.send(new GetObjectCommand(s3Params));
     }
@@ -113,30 +114,31 @@ async function handleStream(req, res) {
 
     data.Body.pipe(res);
   } catch (err) {
-    console.error('Streaming error for key:', req.query.key || req.params.key || req.params[0], err.message);
+    console.error('Stream Fetch Error:', err.message);
     if (!res.headersSent) {
-      res.status(404).send('File not found in Backblaze');
+      res.status(404).send('File not found in Backblaze bucket');
     }
   }
 }
 
-app.get('/api/stream', handleStream);
-app.get('/api/stream/:key', handleStream);
-app.get('/api/stream/*', handleStream);
+app.get('/api/stream', streamHandler);
+app.get('/api/stream/:key', streamHandler);
+app.get('/api/stream/*', streamHandler);
 
 // Delete Route
 app.delete('/api/delete', async (req, res) => {
   try {
     const rawKey = req.query.key || req.params.key || req.params[0];
+    if (!rawKey) return res.status(400).json({ error: 'Missing key' });
+
     const fileKey = decodeURIComponent(rawKey);
     const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
 
-    const command = new DeleteObjectCommand({
+    await s3.send(new DeleteObjectCommand({
       Bucket: bucketName,
       Key: fileKey,
-    });
+    }));
 
-    await s3.send(command);
     res.json({ success: true, message: 'Deleted from B2' });
   } catch (err) {
     console.error('Delete error:', err);
