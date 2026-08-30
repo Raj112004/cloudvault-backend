@@ -29,16 +29,15 @@ const s3 = new S3Client({
   },
 });
 
-// REAL BACKBLAZE B2 HEALTH CHECK HANDSHAKE
+// Real Authenticated B2 Bucket Health Check
 app.get('/api/health', async (req, res) => {
   try {
     const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
-    // Sends an actual auth handshake to Backblaze S3 API
     await s3.send(new HeadBucketCommand({ Bucket: bucketName }));
     res.json({ status: 'ok', message: 'Backblaze B2 Server Working' });
   } catch (err) {
-    console.error('B2 Live Handshake Error:', err);
-    res.status(500).json({ status: 'error', message: err.message || 'Backblaze B2 Auth / Bucket Unreachable' });
+    console.error('B2 Handshake Error:', err);
+    res.status(500).json({ status: 'error', message: err.message || 'Backblaze B2 Unreachable' });
   }
 });
 
@@ -46,7 +45,7 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'CloudVault Backend is running' });
 });
 
-// Upload route
+// Upload Route (Saves exact key matching database)
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
@@ -70,19 +69,33 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-// Stream route with range support
-app.get('/api/stream/:key', async (req, res) => {
+// Robust Media Stream / Image Proxy (Fixes 500 error & supports spaces/underscores)
+app.get('/api/stream/*', async (req, res) => {
   try {
-    const fileKey = req.params.key;
+    // Extract key and decode URL parameters
+    const rawKey = req.params[0] || req.params.key;
+    const fileKey = decodeURIComponent(rawKey);
     const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
 
-    const command = new GetObjectCommand({
+    const s3Params = {
       Bucket: bucketName,
       Key: fileKey,
-      Range: req.headers.range,
-    });
+    };
 
-    const data = await s3.send(command);
+    // Only set Range if browser sends a valid Range header
+    if (req.headers.range) {
+      s3Params.Range = req.headers.range;
+    }
+
+    let data;
+    try {
+      data = await s3.send(new GetObjectCommand(s3Params));
+    } catch (firstErr) {
+      // Fallback: If not found, check with spaces replaced with underscores
+      const altKey = fileKey.replace(/\s+/g, '_');
+      s3Params.Key = altKey;
+      data = await s3.send(new GetObjectCommand(s3Params));
+    }
 
     res.set({
       'Access-Control-Allow-Origin': '*',
@@ -90,6 +103,7 @@ app.get('/api/stream/:key', async (req, res) => {
       'Access-Control-Allow-Headers': 'Range, Origin, Content-Type, Accept',
       'Content-Type': data.ContentType || 'application/octet-stream',
       'Accept-Ranges': 'bytes',
+      'Cache-Control': 'public, max-age=86400',
     });
 
     if (data.ContentLength) res.set('Content-Length', data.ContentLength);
@@ -100,15 +114,17 @@ app.get('/api/stream/:key', async (req, res) => {
 
     data.Body.pipe(res);
   } catch (err) {
-    console.error('Streaming error:', err);
-    if (!res.headersSent) res.status(500).send('Streaming error');
+    console.error('Stream Fetch Error for Key:', req.params[0], err.message);
+    if (!res.headersSent) {
+      res.status(404).send('File not found in Backblaze bucket');
+    }
   }
 });
 
-// Delete route
-app.delete('/api/delete/:key', async (req, res) => {
+// Delete Route
+app.delete('/api/delete/*', async (req, res) => {
   try {
-    const fileKey = req.params.key;
+    const fileKey = decodeURIComponent(req.params[0]);
     const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
 
     const command = new DeleteObjectCommand({
