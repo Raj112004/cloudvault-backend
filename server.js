@@ -60,7 +60,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-// Secure signed stream / download route for private B2 buckets
+// Signed stream route
 app.get('/api/stream/:key', async (req, res) => {
   try {
     const fileKey = req.params.key;
@@ -71,7 +71,6 @@ app.get('/api/stream/:key', async (req, res) => {
       Key: fileKey,
     });
 
-    // Generate a temporary 1-hour signed URL
     const signedUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
     res.redirect(signedUrl);
   } catch (err) {
