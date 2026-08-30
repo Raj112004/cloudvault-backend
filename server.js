@@ -29,7 +29,7 @@ const s3 = new S3Client({
   },
 });
 
-// Real Authenticated B2 Bucket Health Check
+// Live Health Check
 app.get('/api/health', async (req, res) => {
   try {
     const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
@@ -45,7 +45,7 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'CloudVault Backend is running' });
 });
 
-// Upload Route (Saves exact key matching database)
+// Upload Route
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
@@ -69,11 +69,12 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-// Robust Media Stream / Image Proxy (Fixes 500 error & supports spaces/underscores)
-app.get('/api/stream/*', async (req, res) => {
+// Stream Handler Supporting Both Path & Query Params
+async function handleStream(req, res) {
   try {
-    // Extract key and decode URL parameters
-    const rawKey = req.params[0] || req.params.key;
+    const rawKey = req.query.key || req.params.key || req.params[0];
+    if (!rawKey) return res.status(400).send('Missing file key');
+
     const fileKey = decodeURIComponent(rawKey);
     const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
 
@@ -82,7 +83,6 @@ app.get('/api/stream/*', async (req, res) => {
       Key: fileKey,
     };
 
-    // Only set Range if browser sends a valid Range header
     if (req.headers.range) {
       s3Params.Range = req.headers.range;
     }
@@ -90,10 +90,9 @@ app.get('/api/stream/*', async (req, res) => {
     let data;
     try {
       data = await s3.send(new GetObjectCommand(s3Params));
-    } catch (firstErr) {
-      // Fallback: If not found, check with spaces replaced with underscores
-      const altKey = fileKey.replace(/\s+/g, '_');
-      s3Params.Key = altKey;
+    } catch (primaryErr) {
+      // Fallback matching: check with underscores
+      s3Params.Key = fileKey.replace(/\s+/g, '_');
       data = await s3.send(new GetObjectCommand(s3Params));
     }
 
@@ -114,17 +113,22 @@ app.get('/api/stream/*', async (req, res) => {
 
     data.Body.pipe(res);
   } catch (err) {
-    console.error('Stream Fetch Error for Key:', req.params[0], err.message);
+    console.error('Streaming error for key:', req.query.key || req.params.key || req.params[0], err.message);
     if (!res.headersSent) {
-      res.status(404).send('File not found in Backblaze bucket');
+      res.status(404).send('File not found in Backblaze');
     }
   }
-});
+}
+
+app.get('/api/stream', handleStream);
+app.get('/api/stream/:key', handleStream);
+app.get('/api/stream/*', handleStream);
 
 // Delete Route
-app.delete('/api/delete/*', async (req, res) => {
+app.delete('/api/delete', async (req, res) => {
   try {
-    const fileKey = decodeURIComponent(req.params[0]);
+    const rawKey = req.query.key || req.params.key || req.params[0];
+    const fileKey = decodeURIComponent(rawKey);
     const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
 
     const command = new DeleteObjectCommand({
@@ -142,5 +146,5 @@ app.delete('/api/delete/*', async (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`CloudVault backend running on port ${PORT}`);
+  console.log(`CloudVault server running on port ${PORT}`);
 });
