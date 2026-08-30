@@ -7,9 +7,10 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
+// Set maximum single file upload limit to 1 GB (1024 MB)
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 } // 100MB
+  limits: { fileSize: 1024 * 1024 * 1024 } // 1 GB
 });
 
 let rawEndpoint = (process.env.B2_ENDPOINT || 'https://s3.us-east-005.backblazeb2.com').trim();
@@ -33,31 +34,38 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'Backblaze B2 Server Working' });
 });
 
-// Upload route
-app.post('/api/upload', upload.single('file'), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+// Upload route with explicit multer error handling
+app.post('/api/upload', (req, res) => {
+  upload.single('file')(req, res, async (err) => {
+    if (err) {
+      console.error('Multer Upload Limit Error:', err);
+      return res.status(400).json({ error: err.message || 'File size exceeds server upload limit.' });
+    }
 
-    const cleanName = req.file.originalname.replace(/\s+/g, '_');
-    const fileKey = `${Date.now()}-${cleanName}`;
-    const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
+    try {
+      if (!req.file) return res.status(400).json({ error: 'No file provided' });
 
-    const command = new PutObjectCommand({
-      Bucket: bucketName,
-      Key: fileKey,
-      Body: req.file.buffer,
-      ContentType: req.file.mimetype || 'application/octet-stream',
-    });
+      const cleanName = req.file.originalname.replace(/\s+/g, '_');
+      const fileKey = `${Date.now()}-${cleanName}`;
+      const bucketName = (process.env.B2_BUCKET_NAME || '').trim();
 
-    await s3.send(command);
-    res.json({ success: true, fileKey, name: req.file.originalname, size: req.file.size });
-  } catch (error) {
-    console.error('B2 Upload Error:', error);
-    res.status(500).json({ error: error.message || 'Upload failed' });
-  }
+      const command = new PutObjectCommand({
+        Bucket: bucketName,
+        Key: fileKey,
+        Body: req.file.buffer,
+        ContentType: req.file.mimetype || 'application/octet-stream',
+      });
+
+      await s3.send(command);
+      res.json({ success: true, fileKey, name: req.file.originalname, size: req.file.size });
+    } catch (uploadErr) {
+      console.error('B2 Upload Error:', uploadErr);
+      res.status(500).json({ error: uploadErr.message || 'Upload to Backblaze failed' });
+    }
+  });
 });
 
-// Direct Pipe Streaming Route with Full CORS & Range Support
+// Direct Pipe Streaming Route with Full CORS & Byte-Range Support
 app.get('/api/stream/:key', async (req, res) => {
   try {
     const fileKey = req.params.key;
@@ -115,5 +123,5 @@ app.delete('/api/delete/:key', async (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`CloudVault server active on port ${PORT}`);
+  console.log(`CloudVault server running on port ${PORT}`);
 });
